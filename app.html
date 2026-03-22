@@ -173,14 +173,15 @@ body{font-family:'Syne',sans-serif;background:#0a0a0f;color:#e8e4f0;min-height:1
 
 <script>
 const FREE_LIMIT=3;
-const TODAY=new Date().toDateString();
+function getToday(){return new Date().toDateString();}
 
 function getUsage(){
   try{
     const s=JSON.parse(localStorage.getItem('ls_usage')||'{}');
-    if(s.date!==TODAY)return{count:0,date:TODAY,pro:s.pro||false};
+    const today=getToday();
+    if(s.date!==today)return{count:0,date:today,pro:s.pro||false};
     return s;
-  }catch(e){return{count:0,date:TODAY,pro:false};}
+  }catch(e){return{count:0,date:getToday(),pro:false};}
 }
 function saveUsage(u){try{localStorage.setItem('ls_usage',JSON.stringify(u));}catch(e){}}
 function isPro(){return getUsage().pro;}
@@ -396,10 +397,27 @@ async function startScan(){
   stepActive(1);
   const local=localCheck(url);
   const parsed=parseUrl(url);
-  await delay(600);stepActive(2);await delay(700);stepActive(3);
+  await delay(600);
+
+  // If whitelisted, skip AI entirely - no false positives
+  if(local.whitelisted){
+    stepActive(4);await delay(300);
+    document.getElementById('scanAnim').className='scanning-anim';
+    const uu=getUsage();if(!uu.pro){uu.count++;uu.date=getToday();saveUsage(uu);renderUsageBar();}
+    renderResult(url,parsed,local,null,true);
+    document.getElementById('scanBtn').disabled=false;
+    return;
+  }
+
+  stepActive(2);await delay(700);stepActive(3);
   let ai=null;
   try{
-    const prompt=`Analiza esta URL en busca de amenazas: ${url}\n\nResponde SOLO con JSON sin backticks:\n{"riesgo":"alto"|"medio"|"bajo","tipo":"phishing"|"malware"|"scam"|"spam"|"legítimo"|"desconocido","resumen":"Una oración concisa","señales":["señal1","señal2","señal3"],"contramedidas":["accion1","accion2","accion3"],"recomendacion":"Una frase de qué hacer"}`;
+    const prompt=`Analiza esta URL en busca de amenazas de seguridad: ${url}
+
+IMPORTANTE: Si el dominio pertenece a servicios conocidos y legítimos como Google, Microsoft, Apple, Amazon, GitHub, Wikipedia, YouTube, Netflix, Spotify, Anthropic, Claude, Netlify, Vercel, urlscan.io, virustotal.com, phishtank.com, o dominios .gov y .edu, responde con riesgo "bajo" y tipo "legítimo".
+
+Responde SOLO con JSON sin backticks:
+{"riesgo":"alto"|"medio"|"bajo","tipo":"phishing"|"malware"|"scam"|"spam"|"legítimo"|"desconocido","resumen":"Una oración concisa","señales":["señal1","señal2","señal3"],"contramedidas":["accion1","accion2","accion3"],"recomendacion":"Una frase de qué hacer"}`;
     const resp=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:1000,tools:[{type:'web_search_20250305',name:'web_search'}],messages:[{role:'user',content:prompt}]})});
     const data=await resp.json();
     const txt=(data.content||[]).filter(b=>b.type==='text').map(b=>b.text).join('');
@@ -408,8 +426,8 @@ async function startScan(){
   }catch(e){}
   stepActive(4);await delay(400);
   document.getElementById('scanAnim').className='scanning-anim';
-  const uu=getUsage();if(!uu.pro){uu.count++;uu.date=TODAY;saveUsage(uu);renderUsageBar();}
-  renderResult(url,parsed,local,ai);
+  const uu=getUsage();if(!uu.pro){uu.count++;uu.date=getToday();saveUsage(uu);renderUsageBar();}
+  renderResult(url,parsed,local,ai,false);
   document.getElementById('scanBtn').disabled=false;
 }
 
@@ -432,9 +450,20 @@ function buildWAMessage(r){
   return lines.join('\n');
 }
 
-function renderResult(url,parsed,local,ai){
-  const riesgo=ai?ai.riesgo:(local.score>50?'alto':local.score>20?'medio':'bajo');
-  const score=ai?(riesgo==='alto'?87:riesgo==='medio'?52:14):local.score;
+function renderResult(url,parsed,local,ai,forceWhitelist){
+  // Whitelist always wins — never show as dangerous if locally whitelisted
+  let riesgo, score;
+  if(local.whitelisted||forceWhitelist){
+    riesgo='bajo'; score=0;
+  } else if(ai){
+    riesgo=ai.riesgo;
+    score=riesgo==='alto'?87:riesgo==='medio'?52:14;
+    // Don't let AI override a low local score with a high verdict
+    if(local.score<=10 && riesgo==='alto') riesgo='medio';
+  } else {
+    riesgo=local.score>50?'alto':local.score>20?'medio':'bajo';
+    score=local.score;
+  }
   const tipo=ai?ai.tipo:'desconocido';
   const resumen=ai?ai.resumen:'Análisis basado en patrones locales.';
   const señales=ai?ai.señales:(local.flags.length?local.flags:['No se detectaron señales críticas']);
