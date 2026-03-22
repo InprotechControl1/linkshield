@@ -172,7 +172,7 @@ body{font-family:'Syne',sans-serif;background:#0a0a0f;color:#e8e4f0;min-height:1
 </div>
 
 <script>
-const FREE_LIMIT=5;
+const FREE_LIMIT=3;
 const TODAY=new Date().toDateString();
 
 function getUsage(){
@@ -198,10 +198,10 @@ function renderUsageBar(){
   dots.innerHTML='';
   for(let i=0;i<FREE_LIMIT;i++){
     const d=document.createElement('div');
-    d.className='usage-dot'+(i<u.count?(i===FREE_LIMIT-1?' last':' used'):'');
+    d.className='usage-dot'+(i<u.count?(i===FREE_LIMIT-1||u.count>=FREE_LIMIT?' last':' used'):'');
     dots.appendChild(d);
   }
-  txt.innerHTML=rem>0?`<strong>${rem} análisis</strong> restantes hoy (plan free)`:'<strong>Límite alcanzado</strong> — actualiza a Pro';
+  txt.innerHTML=rem>0?`<strong>${rem} de 3</strong> análisis restantes hoy · plan free`:'<strong>Límite alcanzado</strong> — actualiza a Pro';
 }
 
 function showPaywall(){
@@ -209,7 +209,7 @@ function showPaywall(){
   pz.innerHTML=`
     <div class="paywall">
       <h3>Desbloquea Link Shield Pro</h3>
-      <p>Has usado tus 5 análisis gratuitos de hoy.<br/>Actualiza para análisis ilimitados y más funciones.</p>
+      <p>Has usado tus 3 análisis gratuitos de hoy.<br/>Actualiza para análisis ilimitados y más funciones.</p>
       <div class="paywall-price">$7 <span>/mes</span></div>
       <ul class="paywall-features">
         <li>Análisis ilimitados</li>
@@ -236,26 +236,143 @@ function closePaywall(){
   document.getElementById('paywallZone').innerHTML='';
 }
 
-document.addEventListener('DOMContentLoaded',renderUsageBar);
+window.addEventListener('load', function(){ renderUsageBar(); });
 
-const PHISHING=['bit.ly','tinyurl.com','goo.gl','ow.ly','paypa1.com','paypall.com','arnazon.com','amaz0n.com','g00gle.com','micros0ft.com','app1e.com','faceb00k.com','netfl1x.com'];
-const SUSPICIOUS=[/\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/,/[a-z0-9\-]{35,}/,/(login|verify|account|secure|update|confirm|bank|paypal|amazon|netflix|microsoft)/i,/(\.xyz|\.tk|\.ml|\.ga|\.cf|\.gq|\.top|\.work|\.click|\.download)/i,/(free|prize|winner|claim|urgent|limited|act-now)/i];
-let lastReport=null;
+// ── WHITELIST (dominios seguros conocidos) ──────────────────────────
+const WHITELIST = {
+  exact: new Set([
+    'urlscan.io','virustotal.com','phishtank.com','eicar.org',
+    'malshare.com','hybrid-analysis.com','any.run','joesandbox.com',
+    'otx.alienvault.com','talosintelligence.com','opendns.com',
+    'sucuri.net','wordfence.com','malwarebazaar.abuse.ch',
+    'google.com','microsoft.com','apple.com','amazon.com',
+    'cloudflare.com','github.com','gitlab.com','stackoverflow.com',
+    'wikipedia.org','medium.com','dev.to','github.io',
+    'youtube.com','twitter.com','linkedin.com','facebook.com',
+    'instagram.com','netflix.com','spotify.com','dropbox.com',
+    'notion.so','slack.com','zoom.us','figma.com','canva.com',
+    'netlify.app','netlify.com','vercel.app','vercel.com',
+    'anthropic.com','openai.com','claude.ai',
+    'urlvoid.com','checkphish.ai','safebrowsing.google.com',
+    'bit.ly','tinyurl.com','goo.gl','ow.ly','t.co',
+    'lnkd.in','linktr.ee','rebrandly.com','short.io',
+    'usa.gov','mit.edu','stanford.edu','harvard.edu'
+  ]),
+  suffixes: ['.gov','.gob.mx','.gob.es','.gov.uk','.edu','.edu.mx','.edu.es','.mil']
+};
 
-function parseUrl(url){
-  try{const u=new URL(url);return{ok:true,proto:u.protocol,host:u.hostname,path:u.pathname+u.search,https:u.protocol==='https:',hasSub:u.hostname.split('.').length>2};}
-  catch(e){return{ok:false};}
+// ── ACORTADORES con nivel de riesgo ─────────────────────────────────
+const SHORTENERS = {
+  low:    ['t.co','lnkd.in','linktr.ee','rebrandly.com','goo.gl','short.io'],
+  medium: ['bit.ly','tinyurl.com','cutt.ly','ow.ly','buff.ly','is.gd','v.gd','shorturl.at','tiny.cc','short.link'],
+  high:   ['shorte.st','adf.ly','bc.vc','za.gl','clk.sh']
+};
+
+// ── PATRONES de alto riesgo ──────────────────────────────────────────
+const PATTERNS_HIGH = [
+  /\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/,
+  /(login|verify|account|secure|update|confirm).*redirect/i,
+  /(paypa1|paypall|arnazon|amaz0n|g00gle|micros0ft|app1e|faceb00k|netfl1x)/i,
+  /\.(exe|scr|bat|ps1|vbs|cmd)$/i
+];
+const PATTERNS_MED = [
+  /(free.*prize|winner.*claim|urgent.*limited|act-now)/i,
+  /(password|bank.*login|credit.*card)/i,
+  /[a-z0-9\-]{40,}/
+];
+const RISKY_TLDS = /\.(tk|ml|ga|cf|gq|top|work|click|download|xyz|zip|mov)$/i;
+
+let lastReport = null;
+
+// ── NORMALIZADOR de URLs ─────────────────────────────────────────────
+function normalizeUrl(raw) {
+  let url = raw.trim().replace(/\s+/g,'').toLowerCase();
+  if (!url.startsWith('http://') && !url.startsWith('https://')) {
+    url = 'https://' + url;
+  }
+  url = url.replace(/\/+$/, '');
+  return url;
 }
-function localCheck(url){
-  let score=0,flags=[];
-  const p=parseUrl(url);
-  if(!p.ok)return{score:90,flags:['URL malformada o inválida']};
-  if(!p.https){flags.push('Sin HTTPS — conexión no cifrada');score+=28;}
-  PHISHING.forEach(d=>{if(url.toLowerCase().includes(d)){flags.push('Dominio en lista de phishing: '+d);score+=45;}});
-  SUSPICIOUS.forEach(r=>{if(r.test(url))score+=10;});
-  if(p.path.length>100){flags.push('URL muy larga — técnica de ofuscación');score+=12;}
-  if(p.hasSub){flags.push('Usa subdominios múltiples');score+=8;}
-  return{score:Math.min(score,98),flags};
+
+// ── EXTRAE dominio limpio ────────────────────────────────────────────
+function extractDomain(url) {
+  try {
+    const u = new URL(url);
+    return u.hostname.replace(/^www\./, '').toLowerCase();
+  } catch(e) { return ''; }
+}
+
+// ── WHITELIST checker ────────────────────────────────────────────────
+function isWhitelisted(domain) {
+  if (WHITELIST.exact.has(domain)) return true;
+  for (const sfx of WHITELIST.suffixes) {
+    if (domain.endsWith(sfx)) return true;
+  }
+  return false;
+}
+
+// ── SHORTENER checker ────────────────────────────────────────────────
+function checkShortener(domain) {
+  if (SHORTENERS.high.includes(domain))   return {is:true, risk:'high',   score:30};
+  if (SHORTENERS.medium.includes(domain)) return {is:true, risk:'medium', score:15};
+  if (SHORTENERS.low.includes(domain))    return {is:true, risk:'low',    score:5};
+  return {is:false, risk:'none', score:0};
+}
+
+// ── PARSEURL ─────────────────────────────────────────────────────────
+function parseUrl(url) {
+  try {
+    const u = new URL(url);
+    return {ok:true, proto:u.protocol, host:u.hostname, path:u.pathname+u.search,
+            https:u.protocol==='https:', hasSub:u.hostname.split('.').length>2};
+  } catch(e) { return {ok:false}; }
+}
+
+// ── ANÁLISIS LOCAL COMPLETO ──────────────────────────────────────────
+function localCheck(rawUrl) {
+  const url = normalizeUrl(rawUrl);
+  const p   = parseUrl(url);
+  if (!p.ok) return {score:90, flags:['URL malformada o inválida'], normalized:url, whitelisted:false, shortener:null};
+
+  const domain = extractDomain(url);
+
+  // 1. Whitelist: score 0 inmediato
+  if (isWhitelisted(domain)) {
+    return {score:0, flags:['Dominio en lista blanca de confianza'], normalized:url, whitelisted:true, shortener:null};
+  }
+
+  let score = 0;
+  let flags = [];
+
+  // 2. HTTPS
+  if (!p.https) { flags.push('Sin HTTPS — conexión no cifrada'); score += 25; }
+
+  // 3. Acortador
+  const short = checkShortener(domain);
+  if (short.is) {
+    const label = short.risk==='high'?'alto':short.risk==='medium'?'medio':'bajo';
+    flags.push(`Acortador de URL detectado — riesgo ${label}`);
+    score += short.score;
+  }
+
+  // 4. TLD riesgoso
+  if (RISKY_TLDS.test(domain)) { flags.push('Extensión de dominio de alto riesgo (.tk, .xyz, etc.)'); score += 30; }
+
+  // 5. Patrones alto riesgo
+  PATTERNS_HIGH.forEach(r => { if (r.test(url)) { score += 20; } });
+
+  // 6. Patrones medio riesgo
+  PATTERNS_MED.forEach(r => { if (r.test(url)) { score += 10; } });
+
+  // 7. URL muy larga
+  if (p.path.length > 100) { flags.push('URL muy larga — posible ofuscación'); score += 10; }
+
+  // 8. Subdominios excesivos
+  if (p.host.split('.').length > 3) { flags.push('Subdominios múltiples — técnica de camuflaje'); score += 8; }
+
+  if (flags.length === 0) flags.push('No se detectaron señales locales críticas');
+
+  return {score:Math.min(score,98), flags, normalized:url, whitelisted:false, shortener:short.is?short:null};
 }
 function stepActive(n){
   for(let i=1;i<=4;i++){
@@ -266,10 +383,12 @@ function stepActive(n){
 function delay(ms){return new Promise(r=>setTimeout(r,ms));}
 
 async function startScan(){
-  const url=document.getElementById('urlInput').value.trim();
-  if(!url){showToast('Por favor ingresa una URL.');return;}
+  const rawUrl=document.getElementById('urlInput').value.trim();
+  if(!rawUrl){showToast('Por favor ingresa una URL.');return;}
   const u=getUsage();
   if(!u.pro && u.count>=FREE_LIMIT){showPaywall();return;}
+  const url=normalizeUrl(rawUrl);
+  document.getElementById('urlInput').value=url;
   document.getElementById('scanBtn').disabled=true;
   document.getElementById('scanAnim').className='scanning-anim active';
   document.getElementById('resultZone').className='result-zone';
@@ -354,9 +473,11 @@ function renderResult(url,parsed,local,ai){
     </div>
     <div class="badge-row">
       <span class="badge badge-purple">${tipo}</span>
+      ${local.whitelisted?'<span class="badge badge-green">lista blanca</span>':''}
       ${!parsed.https?'<span class="badge badge-red">sin https</span>':''}
-      ${parsed.hasSub?'<span class="badge badge-amber">subdominios</span>':''}
-      ${isSafe?'<span class="badge badge-green">sin amenazas</span>':''}
+      ${local.shortener&&local.shortener.is?'<span class="badge badge-amber">acortador</span>':''}
+      ${parsed.hasSub&&!local.whitelisted?'<span class="badge badge-amber">subdominios</span>':''}
+      ${isSafe&&!local.whitelisted?'<span class="badge badge-green">sin amenazas</span>':''}
     </div>
     <div class="detail-grid">
       <div class="detail-box"><div class="box-title">// señales detectadas</div>${señalesHtml}</div>
@@ -437,6 +558,7 @@ function showToast(msg){
   el.textContent=msg;el.className='toast active';
   setTimeout(()=>{el.className='toast';},3000);
 }
+renderUsageBar();
 </script>
 </body>
 </html>
